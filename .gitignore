@@ -1,0 +1,9 @@
+# Krita
+*.png~
+*.ico~
+*autosave.kra
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
