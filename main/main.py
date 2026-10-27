@@ -535,8 +535,6 @@ class Game:
         for gx, gy in self.centers:
             x, y = int(gx * W), int(gy * H)
             tgt = (W - 100, H - 65) if gx >= 0.5 else (100, H - 65)
-            pygame.draw.line(surf, (255, 255, 255), (x, y), tgt, 1)
-            pygame.draw.line(surf, col_active, (x, y), tgt, 2)
             pygame.draw.circle(surf, col_active, (x, y), base_r, 3)
             pygame.draw.circle(surf, (255, 255, 255), (x, y), 9)
             ph = (pygame.time.get_ticks() % 700) / 700.0
