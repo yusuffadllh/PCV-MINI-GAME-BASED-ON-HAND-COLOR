@@ -17,7 +17,8 @@ pip install pygame-ce opencv-python numpy
 Jalankan game:
 
 ```
-python main/local_game.py
+python main/main.py
+
 ```
 
 ## Aset
