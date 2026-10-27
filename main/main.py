@@ -48,13 +48,14 @@ MAX_SPEED = 640.0
 WHEEL_R = 13.0
 WHEELBASE = 76.0
 REST = 0.0
+SUSP_TRAVEL = 6.0
+SUSP_RATE = 14.0
 AIR_TORQUE = 9.5
 AIR_SPIN_CAP = 8.5
 BOUNCE_VN = -240.0
 BOUNCE_REST = 0.25
 HEAD_OFF = 24.0
-FUEL_TIME = 60.0
-REVERSE_ENGINE = 700.0
+FUEL_TIME = 18.0
 MAX_SLOPE = 0.85
 MAPS = {
     "countryside": {
@@ -199,11 +200,11 @@ def make_car(start_x, pts):
             "roll": 0.0,
         },
         "omega": 0.0,
+        "susp": 0.0,
         "start_x": start_x,
         "max_dist": 0.0,
         "coins": 0,
         "fuel": 1.0,
-        "fuel_out": False,
     }
 
 
@@ -213,7 +214,7 @@ def car_pose(car):
     return (rw["x"] + fw["x"]) / 2, (rw["y"] + fw["y"]) / 2, a
 
 
-def step_car(car, pts, gas, brake, dt, reverse=False):
+def step_car(car, pts, gas, brake, dt):
     rw, fw = car["rear"], car["front"]
     for w in (rw, fw):
         gy = ground_y(pts, w["x"])
@@ -228,9 +229,6 @@ def step_car(car, pts, gas, brake, dt, reverse=False):
             sp = w["vx"] * tx + w["vy"] * ty
             if gas:
                 sp += ENGINE * dt
-            elif reverse:
-                sp -= REVERSE_ENGINE * dt
-                sp = max(sp, -MAX_SPEED * 0.4)
             elif brake:
                 s = 1.0 if sp > 0 else -1.0
                 sp -= min(abs(sp), BRAKE_DEC * dt) * s
@@ -245,7 +243,11 @@ def step_car(car, pts, gas, brake, dt, reverse=False):
     for w in (rw, fw):
         w["x"] += w["vx"] * dt
         w["y"] += w["vy"] * dt
-        w["roll"] += (w["vx"] / WHEEL_R) * dt * 180.0 / math.pi
+        if w["grounded"]:
+            sp = w["vx"] * w["tx"] + w["vy"] * w["ty"]
+        else:
+            sp = w["vx"]
+        w["roll"] += (sp / WHEEL_R) * dt * 180.0 / math.pi
     for _ in range(4):
         dx, dy = fw["x"] - rw["x"], fw["y"] - rw["y"]
         dist = math.hypot(dx, dy) or 1e-6
@@ -292,6 +294,11 @@ def step_car(car, pts, gas, brake, dt, reverse=False):
             w["vy"] += car["omega"] * rx * dt
     else:
         car["omega"] *= max(0.0, 1.0 - 12.0 * dt)
+    body_y = (rw["y"] + fw["y"]) / 2.0
+    gy_avg = ground_y(pts, (rw["x"] + fw["x"]) / 2.0)
+    clearance = max(0.0, gy_avg - body_y - WHEEL_R)
+    target_susp = min(SUSP_TRAVEL, clearance * 0.5)
+    car["susp"] += (target_susp - car["susp"]) * min(1.0, SUSP_RATE * dt)
 
 
 def check_death(pts, car):
@@ -399,9 +406,35 @@ class Game:
         self.assets["coin_s"] = [
             self._scaled(f, 26) for f in self.assets["coin_frames"] if f is not None
         ]
-        self.assets["fuel_s"] = [
-            self._scaled(f, 44) for f in self.assets["fuel_frames"] if f is not None
-        ]
+
+        self.assets["coin_s"] = self._trim_and_scale(self.assets["coin_frames"], 26)
+        self.assets["fuel_s"] = self._trim_and_scale(self.assets["fuel_frames"], 44)
+
+    @staticmethod
+    def _trim_and_scale(frames, target_w):
+        """Padatkan sprite ke bbox-nya dulu, biar transparansinya nggak ikut diskala."""
+        out = []
+        for f in frames:
+            if f is None:
+                continue
+            arr = pygame.surfarray.pixels_alpha(f)
+            import numpy as _np
+
+            xs = _np.where(arr.max(axis=1) > 10)[0]
+            ys = _np.where(arr.max(axis=0) > 10)[0]
+            del arr
+            if len(xs) == 0 or len(ys) == 0:
+                continue
+            box = pygame.Rect(
+                int(xs.min()),
+                int(ys.min()),
+                int(xs.max() - xs.min() + 1),
+                int(ys.max() - ys.min() + 1),
+            )
+            trimmed = f.subsurface(box).copy()
+            th = int(trimmed.get_height() * target_w / trimmed.get_width())
+            out.append(pygame.transform.smoothscale(trimmed, (int(target_w), th)))
+        return out
 
     @staticmethod
     def _scaled(img, target_w):
@@ -715,6 +748,7 @@ class Game:
         fuels = make_fuels(pts, cfg)
         cam_x, cam_y = 0.0, ground_y(pts, 300) - H * 0.55
         dead = finished = False
+        out_of_fuel = False
         over_timer = 0.0
         paused = False
         self.frame_i = 0
@@ -735,7 +769,6 @@ class Game:
                 or keys[pygame.K_DOWN]
                 or keys[pygame.K_a]
             )
-            reverse = bool(keys[pygame.K_s])
             for e in pygame.event.get():
                 if e.type == pygame.QUIT:
                     self.running = False
@@ -748,19 +781,22 @@ class Game:
                 paused = False
                 continue
             if not (dead or finished):
-                gas_on = gas and not car["fuel_out"]
+                gas_on = gas and car["fuel"] > 0.0
                 for _ in range(2):
-                    step_car(car, pts, gas_on, brake, dt / 2, reverse=reverse)
+                    step_car(car, pts, gas_on, brake, dt / 2)
                 cx, cy, _ = car_pose(car)
                 if gas_on:
                     car["fuel"] -= dt / FUEL_TIME
-                elif not gas:
-                    car["fuel"] = min(1.0, car["fuel"] + dt / 60.0)
-                else:
-                    car["fuel"] -= 4 * dt / FUEL_TIME
                 if car["fuel"] <= 0.0:
                     car["fuel"] = 0.0
-                    car["fuel_out"] = True
+                    if not dead:
+                        dead = True
+                        out_of_fuel = True
+                        cx, cy, _ = car_pose(car)
+                        for w in (car["rear"], car["front"]):
+                            w["vx"] = w["vy"] = 0.0
+                        car["omega"] = 0.0
+                        over_timer = -1.2
                 if check_death(pts, car):
                     dead = True
                     cx, cy, _ = car_pose(car)
@@ -773,7 +809,10 @@ class Game:
                     if not f["taken"] and math.hypot(cx - f["x"], cy - f["y"]) < 46:
                         f["taken"] = True
                         car["fuel"] = 1.0
-                        car["fuel_out"] = False
+                        if out_of_fuel:
+                            dead = False
+                            out_of_fuel = False
+                            over_timer = 0.0
                 if dead:
                     car["vx"] = car["vy"] = car["omega"] = 0.0
                     for w in (car["rear"], car["front"]):
@@ -783,11 +822,11 @@ class Game:
             else:
                 over_timer += dt
                 if over_timer > 1.0:
-                    return self.screen_result(map_id, car, finished)
+                    return self.screen_result(map_id, car, finished, out_of_fuel)
             cam_x += ((cx - W * 0.35) - cam_x) * min(1.0, 8 * dt)
             cam_y += ((cy - H * 0.45) - cam_y) * min(1.0, 8 * dt)
             self._draw_world(pts, coins, fuels, car, cam_x, cam_y)
-            self._draw_hud(map_id, car, gas, brake, best, dead, finished, reverse)
+            self._draw_hud(map_id, car, gas, brake, best, dead, finished, out_of_fuel)
             self._draw_virtual_cursor(self.screen)
             pygame.display.flip()
         return "QUIT"
@@ -804,7 +843,7 @@ class Game:
                 return "home"
         return "home"
 
-    def screen_result(self, map_id, car, finished):
+    def screen_result(self, map_id, car, finished, out_of_fuel=False):
         score = int(car["max_dist"]) * 10 + car["coins"] * 50
         new_rec = update_records(self.save, map_id, score, car["max_dist"])
         save_savegame(self.save)
@@ -818,7 +857,7 @@ class Game:
             stats.append("REKOR BARU!")
         while self.running:
             ch = self._menu_screen(
-                "FINISH!" if finished else "MOBIL RUSAK!",
+                "FINISH!" if finished else "BENSIN HABIS!",
                 ["Main Lagi", "Pilih Map", "Home"],
                 subtitle=stats,
                 note=None,
@@ -924,16 +963,19 @@ class Game:
             spr = pygame.transform.rotate(body, -math.degrees(a))
             r = spr.get_rect(
                 center=(
-                    int(cx + up[0] * 44 - cam_x),
-                    int(cy + up[1] * 44 - cam_y),
+                    int(cx + up[0] * (44.0 + car.get("susp", 0.0)) - cam_x),
+                    int(cy + up[1] * (44.0 + car.get("susp", 0.0)) - cam_y),
                 )
             )
             self.screen.blit(spr, r.topleft)
-            hx, hy = cx + up[0] * HEAD_OFF, cy + up[1] * HEAD_OFF
+            hx, hy = (
+                cx + up[0] * (HEAD_OFF + car.get("susp", 0.0)),
+                cy + up[1] * (HEAD_OFF + car.get("susp", 0.0)),
+            )
             if driver is not None:
                 dcx, dcy = (
-                    hx + fwd[0] * 8.0 + up[0] * 30.0 - cam_x,
-                    hy + fwd[1] * 8.0 + up[1] * 30.0 - cam_y,
+                    hx + fwd[0] * -31.0 + up[0] * 47.0 - cam_x,
+                    hy + fwd[1] * -31.0 + up[1] * 47.0 - cam_y,
                 )
                 dspr = pygame.transform.rotate(driver, -math.degrees(a))
                 dh = dspr.get_rect(center=(int(dcx), int(dcy)))
@@ -942,9 +984,13 @@ class Game:
                 pygame.draw.circle(self.screen, (255, 220, 180), tp(hx, hy), 9)
                 pygame.draw.circle(self.screen, (240, 240, 240), tp(hx, hy), 11, 2)
             for w in (rw, fw):
+                side = 1.0 if w is fw else -1.0
                 ang = -math.degrees(w.get("roll", 0.0))
                 wr = pygame.transform.rotate(wheel_img, ang)
-                rr = wr.get_rect(center=(int(w["x"] - cam_x), int(w["y"] - cam_y)))
+                wx_v = cx + fwd[0] * side * 34.0 + up[0] * 14.0
+                wy_v = cy + fwd[1] * side * 34.0 + up[1] * 14.0
+                wy_v = max(wy_v, ground_y(pts, wx_v) - WHEEL_R)
+                rr = wr.get_rect(center=(int(wx_v - cam_x), int(wy_v - cam_y)))
                 self.screen.blit(wr, rr.topleft)
         else:
             corners = [
@@ -971,7 +1017,9 @@ class Game:
                     self.screen, (90, 90, 90), tp(w["x"], w["y"]), int(WHEEL_R), 2
                 )
 
-    def _draw_hud(self, map_id, car, gas, brake, best, dead, finished, reverse=False):
+    def _draw_hud(
+        self, map_id, car, gas, brake, best, dead, finished, out_of_fuel=False
+    ):
         hud = [
             f"Jarak: {car['max_dist']:.0f} m",
             f"Koin: {car['coins']}",
@@ -1024,29 +1072,11 @@ class Game:
                 (20, 20, 20) if on else (200, 205, 215),
                 True,
             )
-        rev_rect = brake_rect.move(0, -78)
-        col = (90, 170, 255) if reverse else (60, 70, 90)
-        pygame.draw.rect(self.screen, col, rev_rect, border_radius=12)
-        pygame.draw.rect(
-            self.screen,
-            (255, 255, 255) if reverse else (120, 130, 150),
-            rev_rect,
-            3,
-            border_radius=12,
-        )
-        self._text(
-            self.screen,
-            self.f_menu,
-            "MUNDUR",
-            rev_rect.center,
-            (20, 20, 20) if reverse else (200, 205, 215),
-            True,
-        )
         if dead:
             self._text(
                 self.screen,
                 self.f_title,
-                "MOBIL RUSAK!",
+                "BENSIN HABIS!" if out_of_fuel else "MOBIL RUSAK!",
                 (W // 2, H // 2 - 60),
                 (255, 90, 90),
                 True,
