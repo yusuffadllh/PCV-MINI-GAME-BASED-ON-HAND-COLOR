@@ -744,6 +744,9 @@ class Game:
         car = make_car(300, pts)
         coins = make_coins(pts, cfg)
         fuels = make_fuels(pts, cfg)
+        # --- smoke-test: log metrik per frame untuk laporan penilaian ---
+        self._smoke_log = []
+        smoke = "--smoke" in sys.argv
         cam_x, cam_y = 0.0, ground_y(pts, 300) - H * 0.55
         dead = finished = False
         out_of_fuel = False
@@ -751,6 +754,13 @@ class Game:
         paused = False
         self.frame_i = 0
         best = self.save["maps"].get(map_id, {}).get("best_score", 0)
+        # --- smoke-test: pastikan koin & fuel tersedia untuk pengujian scoring ---
+        if "--smoke" in sys.argv and "--no-coins" not in sys.argv:
+            for c in coins:
+                c["taken"] = False
+        # --- smoke-test: full fuel agar bisa menempuh jarak untuk pengujian ---
+        if "--smoke" in sys.argv:
+            car["fuel"] = 1.0
         while self.running:
             dt = min(self.clock.tick(FPS) / 1000.0, 1 / 30.0)
             self._detect_tick()
@@ -767,6 +777,14 @@ class Game:
                 or keys[pygame.K_DOWN]
                 or keys[pygame.K_a]
             )
+            # --- smoke-test hooks ---
+            if "--smoke" in sys.argv:
+                gas = True  # auto-gas sepanjang smoke test
+                if "--collect-coins" in sys.argv:
+                    for c in coins:
+                        if not c["taken"]:
+                            c["taken"] = True
+                            car["coins"] += 1
             for e in pygame.event.get():
                 if e.type == pygame.QUIT:
                     self.running = False
@@ -826,6 +844,20 @@ class Game:
             self._draw_world(pts, coins, fuels, car, cam_x, cam_y)
             self._draw_hud(map_id, car, gas, brake, best, dead, finished, out_of_fuel)
             self._draw_virtual_cursor(self.screen)
+            # --- smoke-test: catat metrik penting per frame ---
+            if "--smoke" in sys.argv:
+                self._smoke_log.append(
+                    {
+                        "x": car["rear"]["x"],
+                        "y": car["rear"]["y"],
+                        "vx": car["rear"]["vx"],
+                        "vy": car["rear"]["vy"],
+                        "fuel": car["fuel"],
+                        "coins": car["coins"],
+                        "dead": dead,
+                        "finished": finished,
+                    }
+                )
             pygame.display.flip()
         return "QUIT"
 
@@ -1092,6 +1124,9 @@ class Game:
     def run(self):
         current_map = None
         state = "home"
+        if "--smoke" in sys.argv:
+            state = "play"
+            current_map = "countryside"
         while self.running:
             if state == "home":
                 state = self.screen_home()
